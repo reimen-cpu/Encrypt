@@ -3,7 +3,7 @@ pqc_env/
 venv/
 env/
 .env/
-
+liboqs
 # Compilados de Python
 __pycache__/
 *.py[cod]
