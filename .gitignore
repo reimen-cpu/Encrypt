@@ -1,0 +1,26 @@
+# Entornos virtuales
+pqc_env/
+venv/
+env/
+.env/
+
+# Compilados de Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyInstaller y Builds
+build/
+dist/
+*.spec
+*.exe
+
+# SO y Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# Archivos de la aplicación y logs
+*.log
