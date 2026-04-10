@@ -24,6 +24,14 @@ _SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
 
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(levelname)s %(name)s] %(message)s",
+)
+logger = logging.getLogger(__name__)
+
 from crypto_classic import (
     aes_gcm_encrypt, aes_gcm_decrypt,
     fernet_encrypt,  fernet_decrypt,
@@ -36,13 +44,9 @@ from liboqs_runtime import (
 _PQC_LOAD_OK, _PQC_VERSION, _PQC_ERROR = check_liboqs_runtime()
 
 if _PQC_LOAD_OK:
-    from crypto_pqc import (
-        ml_kem_encrypt, ml_kem_decrypt,
-        hqc_kem_encrypt, hqc_kem_decrypt,
-        ml_dsa_sign, ml_dsa_verify,
-        slh_dsa_sign, slh_dsa_verify,
-    )
-    from key_manager import generate_kem_keypair, generate_sig_keypair
+    from crypto_core.kem import kem_encrypt, kem_decrypt
+    from crypto_core.dsa import dsa_sign, dsa_verify
+    from key_management.key_manager import generate_kem_keypair, generate_sig_keypair
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Listas de algoritmos disponibles
@@ -615,15 +619,19 @@ class CifradorApp(tk.Tk):
         # Info lateral del algoritmo
         self.algo_info_var.set(self._algo_info(algo))
 
-        # Mostrar/ocultar paneles de credenciales (Contraseña vs Claves PQC)
-        if is_dsa:
-            self.pw_panel.pack_forget()
-            self.pqc_panel.pack(fill="x")
-        else: # Clásico o KEM
+        # Show/hide credential panels (Password vs PQC Keys)
+        if is_cls:
             self.pqc_panel.pack_forget()
             self.pw_panel.pack(fill="x", padx=0, pady=0)
             self.pw_entry.config(state="normal",
                                  bg=C["surface2"], fg=C["text"])
+        else:  # KEM or DSA — both use asymmetric keys
+            self.pw_panel.pack_forget()
+            self.pqc_panel.pack(fill="x")
+            if is_kem:
+                self.pqc_mode_label.config(text="⚛ CLAVES KEM (Pública / Privada)")
+            else:
+                self.pqc_mode_label.config(text="⚛ CLAVES DE FIRMA DIGITAL")
 
         # Campo de firma (solo DSA)
         if is_dsa:
@@ -636,11 +644,9 @@ class CifradorApp(tk.Tk):
         if is_dsa:
             self.input_label_var.set("Paso 1: DOCUMENTO ORIGINAL (Texto sin cifrar)")
             self.result_label_var.set("RESULTADO DE VERIFICACIÓN DSA")
-            self.pqc_mode_label.config(text="⚛ CLAVES DE FIRMA DIGITAL")
         elif is_kem:
             self.input_label_var.set("TEXTO DE ENTRADA  ·  texto a cifrar o token a descifrar")
             self.result_label_var.set("RESULTADO  ·  token cifrado o texto descifrado")
-            self.pqc_mode_label.config(text="⚛ CLAVES KEM (Para cifrar/descifrar)")
         else:
             self.input_label_var.set("TEXTO DE ENTRADA")
             self.result_label_var.set("RESULTADO")
@@ -877,28 +883,24 @@ class CifradorApp(tk.Tk):
 
         elif _is_kem(algo):
             if not self._check_pqc(): return
-            text   = self._get_text()
+            text    = self._get_text()
             if not text: return
-            pw = self._get_password()
-            if not pw: return
-            base = _base(algo)
+            pub_key = self._get_pub_key()
+            if not pub_key: return
+            base    = _base(algo)
             try:
-                if base == "ML-KEM-768":
-                    result = ml_kem_encrypt(text, pw)
-                elif base == "HQC-KEM":
-                    result = hqc_kem_encrypt(text, pw)
-                else:
-                    raise ValueError(f"KEM desconocido: {base}")
+                result = kem_encrypt(text, pub_key, base)
                 self._set_output(result, C["success"])
                 self._set_status(
-                    f"✓ Cifrado con {base} (KEM Derivado + AES-256-GCM)", C["success"])
+                    f"✓ Cifrado con {base} (KEM + HKDF-SHA256 + AES-256-GCM)",
+                    C["success"])
             except Exception as e:
                 messagebox.showerror("Error al cifrar (PQC)", str(e))
                 self._set_status("✗ Error en cifrado post-cuántico", C["danger"])
 
     def _decrypt(self):
         algo = self.algo_var.get()
-        print(f"[DEBUG Acción] _decrypt con algoritmo: {algo}")
+        logger.info("_decrypt: algo=%s", algo)
 
         if algo == "AES-256-GCM":
             text = self._get_text()
@@ -936,24 +938,20 @@ class CifradorApp(tk.Tk):
 
         elif _is_kem(algo):
             if not self._check_pqc(): return
-            text = self._get_text()
+            text     = self._get_text()
             if not text: return
-            pw = self._get_password()
-            if not pw: return
-            base = _base(algo)
+            priv_key = self._get_priv_key()
+            if not priv_key: return
+            base     = _base(algo)
             try:
-                if base == "ML-KEM-768":
-                    result = ml_kem_decrypt(text, pw)
-                elif base == "HQC-KEM":
-                    result = hqc_kem_decrypt(text, pw)
-                else:
-                    raise ValueError(f"KEM desconocido: {base}")
+                result = kem_decrypt(text, priv_key, base)
                 self._set_output(result, C["text"])
                 self._set_status(f"✓ Descifrado con {base}", C["success"])
             except ValueError as e:
                 messagebox.showerror("Error al descifrar (PQC)", str(e))
                 self._set_output("", C["danger"])
-                self._set_status("✗ Descifrado PQC fallido — verifica contraseña", C["danger"])
+                self._set_status("✗ Descifrado PQC fallido — verifica clave privada",
+                                  C["danger"])
             except Exception as e:
                 messagebox.showerror("Error inesperado", str(e))
                 self._set_status("✗ Error inesperado", C["danger"])
@@ -961,7 +959,7 @@ class CifradorApp(tk.Tk):
     # ── Operaciones de firma DSA ───────────────────────────────────────────────
     def _dsa_sign(self):
         if not self._check_pqc(): return
-        print("[DEBUG Acción] Iniciando _dsa_sign")
+        logger.info("_dsa_sign: starting")
         text = self._get_text()
         if not text: return
         priv_key = self._get_priv_key()
@@ -975,12 +973,7 @@ class CifradorApp(tk.Tk):
                 self.update()
 
             data_bytes = text.encode("utf-8")
-            if base == "ML-DSA":
-                signature = ml_dsa_sign(data_bytes, priv_key)
-            elif base == "SLH-DSA":
-                signature = slh_dsa_sign(data_bytes, priv_key)
-            else:
-                raise ValueError(f"DSA desconocido: {base}")
+            signature  = dsa_sign(data_bytes, priv_key, base)
 
             # Mostrar firma en el campo dedicado de firma
             self.sig_text.config(state="normal")
@@ -1006,15 +999,15 @@ class CifradorApp(tk.Tk):
 
     def _dsa_verify(self):
         if not self._check_pqc(): return
-        print("[DEBUG Acción] Iniciando _dsa_verify")
+        logger.info("_dsa_verify: starting")
         text = self._get_text()
         if not text: return
         pub_key = self._get_pub_key()
         if not pub_key: return
 
-        # ── CORRECCIÓN CRÍTICA: leer firma del campo DEDICADO, no del resultado ──
+        # Read signature from dedicated field
         signature = self.sig_text.get("1.0", "end").strip()
-        print(f"[DEBUG DSA] Longitud original de firma obtenida de UI: {len(signature)}")
+        logger.info("_dsa_verify: sig_len=%d", len(signature))
         if not signature:
             messagebox.showwarning(
                 "Falta el sello/firma a verificar",
@@ -1028,14 +1021,10 @@ class CifradorApp(tk.Tk):
         base = _base(self.algo_var.get())
         try:
             data_bytes = text.encode("utf-8")
-            if base == "ML-DSA":
-                valid = ml_dsa_verify(data_bytes, signature, pub_key)
-            elif base == "SLH-DSA":
+            if base == "SLH-DSA":
                 self._set_status("⏳ Verificando firma SLH-DSA…", C["warning"])
                 self.update()
-                valid = slh_dsa_verify(data_bytes, signature, pub_key)
-            else:
-                raise ValueError(f"DSA desconocido: {base}")
+            valid = dsa_verify(data_bytes, signature, pub_key, base)
 
             if valid:
                 self._set_output(
